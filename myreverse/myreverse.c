@@ -14,8 +14,7 @@ int main() {
     char buf[BUF_SIZE];
     int used = 0;
     char skip = 0;
-    char repeat = 1;
-    while(repeat) {
+    while(1) {
         int n = read(0, buf + used, BUF_SIZE - used);
         if (n < 0) return n;
         used += n;
