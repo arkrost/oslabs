@@ -2,9 +2,8 @@
 #include <string.h>
 #include <pthread.h>
 #include <sys/mman.h>
-#include <stdbool.h>
 #include "myalloc.h"
-#define SMALL_MEM_LIMIT 32
+#define SMALL_MEM_LIMIT 128
 #define SMALL_NUM_LIMIT 20
 #define LARGE_NUM_LIMIT 10
 
@@ -45,16 +44,11 @@ static global_memory_t* memory_list = NULL;
 /*
 * Thread safe functions
 */
-static bool is_small(size_t size)
-{
-	return size <= SMALL_MEM_LIMIT;
-}
-
 static bucket_t* new_small_bucket()
 {
 	bucket_t* res = (bucket_t*)mmap(NULL, sizeof(bucket_t) + SMALL_MEM_LIMIT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	res->len = SMALL_MEM_LIMIT;
-	res->mem = res + sizeof(bucket_t);
+	res->mem = (void*)res + sizeof(bucket_t);
 	res->tid = pthread_self();
 	return res;
 }
@@ -64,7 +58,7 @@ static bucket_t* new_large_bucket(size_t size)
 	// assert(size > SMALL_MEM_LIMIT);
 	bucket_t* res = (bucket_t*)mmap(NULL, sizeof(bucket_t) + size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	res->len = size;
-	res->mem = res + sizeof(bucket_t);
+	res->mem = (void*)res + sizeof(bucket_t);
 	res->tid = pthread_self();
 	return res;
 }
