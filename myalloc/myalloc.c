@@ -29,9 +29,11 @@ typedef struct threadlocal
 
 typedef struct global_memory
 {
-	bucket_t* mem;
+	bucket_t* bucket;
 	struct global_memory* next;
 } global_memory_t;
+
+
 /*
 * Globals
 */
@@ -42,24 +44,29 @@ static global_memory_t* memory_list = NULL;
 
 
 /*
-* Thread safe functions
+* Helpers
 */
 static bucket_t* new_small_bucket()
 {
 	bucket_t* res = (bucket_t*)mmap(NULL, sizeof(bucket_t) + SMALL_MEM_LIMIT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	res->len = SMALL_MEM_LIMIT;
-	res->mem = (void*)res + sizeof(bucket_t);
-	res->tid = pthread_self();
+	if (res)
+	{
+		res->len = SMALL_MEM_LIMIT;
+		res->mem = (void*)res + sizeof(bucket_t);
+		res->tid = pthread_self();
+	}
 	return res;
 }
 
 static bucket_t* new_large_bucket(size_t size)
 {
-	// assert(size > SMALL_MEM_LIMIT);
 	bucket_t* res = (bucket_t*)mmap(NULL, sizeof(bucket_t) + size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	res->len = size;
-	res->mem = (void*)res + sizeof(bucket_t);
-	res->tid = pthread_self();
+	if (res) 
+	{
+		res->len = size;
+		res->mem = (void*)res + sizeof(bucket_t);
+		res->tid = pthread_self();
+	}
 	return res;
 }
 
@@ -89,15 +96,12 @@ static void free_threadlocal(threadlocal_t* tl)
 static void free_global_memory(global_memory_t* gm)
 {
 	if (gm == NULL) return;
-	free_bucket(gm->mem);
+	free_bucket(gm->bucket);
 	free_global_memory(gm->next);
 	munmap((void*)gm, sizeof(global_memory_t));
 }
 
-/*
-* Thread unsafe functions
-*/
-threadlocal_t* get_threadlocal(pid_t tid) 
+static threadlocal_t* get_threadlocal(pid_t tid) 
 {
 	threadlocal_t* cur = thread_list;
 	while (cur) 
@@ -108,16 +112,51 @@ threadlocal_t* get_threadlocal(pid_t tid)
 	if (cur == NULL) 
 	{
 		cur = (threadlocal_t*)mmap(NULL, sizeof(threadlocal_t), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (cur == NULL)  return NULL;
 		cur->tid = tid;
 		memset(cur->small, 0, sizeof(bucket_t*)*SMALL_NUM_LIMIT);
 		memset(cur->large, 0, sizeof(bucket_t*)*LARGE_NUM_LIMIT);
 		pthread_mutex_init(&(cur->small_bucket_mutex), 0);
 		pthread_mutex_init(&(cur->large_bucket_mutex), 0);
 		cur->next = thread_list;
-		thread_list = cur;
+		thread_list = cur;	
 	} 
 	return cur;
 }
+
+static void* local_alloc_small(bucket_t** lst, size_t len)
+{
+	size_t offset;
+	for (offset = 0; (offset < len) && (*(lst + offset) == NULL); offset++);
+	if (offset == len) return NULL;
+	void* res = (*(lst + offset))->mem;
+	*(lst + offset) = NULL;
+	return res;
+}
+
+static void* local_alloc_large(bucket_t** lst, size_t len)
+{
+	// TODO
+	return NULL;
+}
+
+static void* global_alloc(size_t len)
+{
+	global_memory_t *prev, *cur;
+	for (cur = memory_list, prev = NULL; (cur != NULL) && (cur->bucket->len < len); prev = cur, cur = cur->next);
+	if (cur == NULL) return NULL;
+	if (prev == NULL)
+	{
+		memory_list = cur->next;
+	}
+	else 
+	{
+		prev->next = cur->next;
+	}
+	cur->bucket->tid = pthread_self();
+	return cur->bucket->mem;
+}
+
 
 
 /*
@@ -125,16 +164,33 @@ threadlocal_t* get_threadlocal(pid_t tid)
 */
 void* malloc(size_t size) 
 {
+	pthread_mutex_lock(&thread_list_mutex);
+	threadlocal_t* iam = get_threadlocal(pthread_self());
+	pthread_mutex_unlock(&thread_list_mutex);
+	if (iam == NULL) return NULL;
+	void* res;
     if (size > SMALL_MEM_LIMIT) 
     {
-    	bucket_t* res = new_large_bucket(size);
-    	return res->mem;
+    	// check local
+    	pthread_mutex_lock(&(iam->large_bucket_mutex));
+    	res = local_alloc_large(&(iam->large[0]), LARGE_NUM_LIMIT);
+    	pthread_mutex_unlock(&(iam->large_bucket_mutex));
+    	if (res != NULL) return res;
+    	// global alloc
+    	pthread_mutex_lock(&memory_list_mutex);
+    	res = global_alloc(size);
+    	pthread_mutex_unlock(&memory_list_mutex);
+    	if (res != NULL) return res;
+    	// map new bucket
+    	bucket_t* new_bucket = new_large_bucket(size);
+    	if (new_bucket) return new_bucket->mem;
     }
     else 
     {
     	bucket_t* res = new_small_bucket();
     	return res->mem;	
     }
+    return NULL;
 }
 
 void free(void* ptr) 
