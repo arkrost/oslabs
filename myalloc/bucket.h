@@ -2,8 +2,7 @@
 #define _BUCKET_H_
 #include <pthread.h>
 
-typedef struct bucket 
-{
+typedef struct bucket {
     size_t extra;
     void* mem;
     struct bucket* next;

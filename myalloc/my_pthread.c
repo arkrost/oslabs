@@ -1,14 +1,14 @@
-#include "mythread.h"
+#include "my_pthread.h"
 #include <sys/mman.h>
 
 #define HASH_SIZE 20000
 
-mythread_t* pthreads[HASH_SIZE] = {};
+static my_pthread_t* pthreads[HASH_SIZE] = {};
 
-mythread_t* get_pthread(pthread_t id) 
+my_pthread_t* get_pthread(pthread_t id) 
 {
     if (pthreads[id % HASH_SIZE]) return pthreads[id % HASH_SIZE];
-    mythread_t* cur = (mythread_t*)mmap(0, sizeof(mythread_t), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    my_pthread_t* cur = (my_pthread_t*)mmap(0, sizeof(my_pthread_t), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     cur->id = id;
     cur->large = NULL;
     cur->small = NULL;
@@ -20,14 +20,14 @@ mythread_t* get_pthread(pthread_t id)
 }
 
 
-void destroy_thread(mythread_t* thread) 
+void destroy_thread(my_pthread_t* thread) 
 {
-    if (!thread) return;
+    if (thread == NULL) return;
     pthread_mutex_destroy(&thread->local_mutex);
     destroy_small(thread->small);
     destroy_large(thread->large);
     pthreads[thread->id % HASH_SIZE] = NULL;
-    munmap((void*)thread, sizeof(mythread_t));
+    munmap((void*)thread, sizeof(my_pthread_t));
 }
 
 void destroy_all() 
