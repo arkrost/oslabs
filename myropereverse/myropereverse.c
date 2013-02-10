@@ -4,7 +4,7 @@
 
 static void write_reversed_rope(struct rope* rope) {
 	if (rope == NULL) return;
-	char buf[rope->size + 2];
+	char buf[rope->size + 1];
 	rope_dump_reversed(rope, buf);
 	buf[rope->size] = buf[0];
 	write(1, buf + 1, rope->size);
@@ -28,13 +28,16 @@ int main()
 			return 0;
 		}
 		if(r) rope_append(r, buf, n); else	r = rope_new(buf, n);
-		int pos, cur = r->size - n;
+		int pos = 0, cur = r->size - n;
 		while (1) {
-			for (pos = 0; pos < n && buf[pos] != '\n'; pos++);
+			for (; pos < n && buf[pos] != '\n'; pos++);
+			// printf("pos %d\n", pos);
 			if (pos < n) {
 				pos++;
+				// printf("cur + pos: %d\n", cur + pos);
 				struct rope* tail = rope_split(r, cur + pos);
 				if (skip) skip = 0;	else write_reversed_rope(r);
+				rope_delete(r);
 				r = tail;
 				cur = -pos;
 			} else {
