@@ -14,6 +14,7 @@
 typedef struct bucket
 {
 	size_t len;
+	pid_t tid;
 	void* mem;
 } bucket_t;
 
@@ -51,13 +52,21 @@ static bool is_small(size_t size)
 
 static bucket_t* new_small_bucket()
 {
-	return (bucket_t*)mmap(NULL, sizeof(bucket_t) + SMALL_MEM_LIMIT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	bucket_t* res = (bucket_t*)mmap(NULL, sizeof(bucket_t) + SMALL_MEM_LIMIT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	res->len = SMALL_MEM_LIMIT;
+	res->mem = res + sizeof(bucket_t);
+	res->tid = pthread_self();
+	return res;
 }
 
 static bucket_t* new_large_bucket(size_t size)
 {
-	assert(size > SMALL_MEM_LIMIT);
-	return (bucket_t*)mmap(NULL, sizeof(bucket_t) + size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	// assert(size > SMALL_MEM_LIMIT);
+	bucket_t* res = (bucket_t*)mmap(NULL, sizeof(bucket_t) + size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	res->len = size;
+	res->mem = res + sizeof(bucket_t);
+	res->tid = pthread_self();
+	return res;
 }
 
 static void free_bucket(bucket_t* bucket)
@@ -80,7 +89,7 @@ static void free_threadlocal(threadlocal_t* tl)
 	pthread_mutex_destroy(&(tl->small_bucket_mutex));
 	pthread_mutex_destroy(&(tl->large_bucket_mutex));
 	free_threadlocal(tl->next);
-	free(tl);
+	munmap((void*)tl, sizeof(threadlocal_t));
 }
 
 static void free_global_memory(global_memory_t* gm)
@@ -88,15 +97,14 @@ static void free_global_memory(global_memory_t* gm)
 	if (gm == NULL) return;
 	free_bucket(gm->mem);
 	free_global_memory(gm->next);
-	free(gm);
+	munmap((void*)gm, sizeof(global_memory_t));
 }
 
 /*
 * Thread unsafe functions
 */
-threadlocal_t* getThreadLocal() 
+threadlocal_t* get_threadlocal(pid_t tid) 
 {
-	pid_t tid = pthread_self();
 	threadlocal_t* cur = thread_list;
 	while (cur) 
 	{
@@ -123,22 +131,44 @@ threadlocal_t* getThreadLocal()
 */
 void* malloc(size_t size) 
 {
-    raise(SIGILL);
+    if (size > SMALL_MEM_LIMIT) 
+    {
+    	bucket_t* res = new_large_bucket(size);
+    	return res->mem;
+    }
+    else 
+    {
+    	bucket_t* res = new_small_bucket();
+    	return res->mem;	
+    }
 }
 
 void free(void* ptr) 
 {
-    raise(SIGILL);
+	free_bucket((bucket_t*)(ptr - sizeof(bucket_t)));
 }
 
 void* calloc(size_t nmemb, size_t size) 
 {
-    raise(SIGILL);
+    size_t n = nmemb * size;
+    void* res = malloc(n);
+    res = memset(res, 0, n);
+    return res;
 }
 
-void* realloc(void* old, size_t size) 
+void* realloc(void* ptr, size_t size) 
 {
-    raise(SIGILL);
+    if (ptr == NULL) return malloc(size);
+    if (size == 0) 
+    {
+        free(ptr);
+        return NULL;
+    }
+    size_t old_size = ((bucket_t*)(ptr - sizeof(bucket_t)))->len;
+    void* res = malloc(size);
+    memcpy(res, ptr, old_size < size ? old_size : size);
+    free(ptr);
+    return res;
 }
 
 void* memalign(size_t align, size_t size) 
