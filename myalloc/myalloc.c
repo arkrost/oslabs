@@ -145,6 +145,7 @@ void* malloc(size_t size)
 
 void free(void* ptr) 
 {
+	if (ptr == NULL) return;
 	free_bucket((bucket_t*)(ptr - sizeof(bucket_t)));
 }
 
