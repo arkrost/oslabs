@@ -3,7 +3,8 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include "myalloc.h"
-#define SMALL_MEM_LIMIT 128
+
+#define SMALL_MEM_LIMIT 1024
 #define SMALL_NUM_LIMIT 20
 #define LARGE_NUM_LIMIT 10
 
@@ -108,7 +109,7 @@ void* malloc(size_t size)
 	threadlocal_t* tl = get_threadlocal(pthread_self());
 	pthread_mutex_unlock(&thread_list_mutex); 
 	if (tl == NULL) return NULL;
-	bucket_t* res;
+	bucket_t* res = NULL;
     if (size > SMALL_MEM_LIMIT) 
     {
     	res = new_bucket(size);
@@ -139,6 +140,7 @@ void free(void* ptr)
 	pthread_mutex_lock(&thread_list_mutex); 
 	threadlocal_t* tl = get_threadlocal(bucket->tid);
 	pthread_mutex_unlock(&thread_list_mutex); 
+	if (tl == NULL) return;
 	if (bucket->len > SMALL_MEM_LIMIT)
 	{
 		free_bucket(bucket);	
@@ -157,7 +159,6 @@ void free(void* ptr)
 		// free if thread's cache is full
 		if (bucket)	free_bucket(bucket);
 	}
-	
 }
 
 void* calloc(size_t nmemb, size_t size) 
