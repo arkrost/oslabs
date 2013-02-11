@@ -4,7 +4,7 @@
 #include <sys/mman.h>
 #include "myalloc.h"
 
-#define SMALL_MEM_LIMIT 1024
+#define SMALL_MEM_LIMIT 8
 #define SMALL_NUM_LIMIT 20
 #define LARGE_NUM_LIMIT 10
 
@@ -112,12 +112,35 @@ void* malloc(size_t size)
 	bucket_t* res = NULL;
     if (size > SMALL_MEM_LIMIT) 
     {
+    	bucket_t* prev;
+    	// chech local cache
+    	pthread_mutex_lock(&(tl->large_bucket_mutex));
+    	for (res = tl->large_list, prev = NULL; (res != NULL) && (res->len < size); prev = res, res = res->next);
+    	if (res)
+    	{
+    		prev->next = res->next;
+    		res->next = NULL;
+    	}
+    	pthread_mutex_unlock(&(tl->large_bucket_mutex));
+    	if (res) return res->mem;
+    	// check global cache
+    	pthread_mutex_lock(&memory_list_mutex);
+    	for (res = memory_list, prev = NULL; (res != NULL) && (res->len < size); prev = res, res = res->next);
+    	if (res)
+    	{
+    		prev->next = res->next;
+    		res->tid = pthread_self();
+    		res->next = NULL;
+    	}
+    	pthread_mutex_unlock(&memory_list_mutex);
+    	if (res) return res->mem;
+    	// allocate new
     	res = new_bucket(size);
     	return res->mem;
     }
     else 
     {
-    	// check local mem
+    	// check local cache
     	pthread_mutex_lock(&(tl->small_bucket_mutex));
 		if (tl->small_list) 
 		{
@@ -143,7 +166,21 @@ void free(void* ptr)
 	if (tl == NULL) return;
 	if (bucket->len > SMALL_MEM_LIMIT)
 	{
-		free_bucket(bucket);	
+		// release to thread memory cache
+		pthread_mutex_lock(&(tl->large_bucket_mutex));
+		if(bucket_list_size(tl->large_list) < LARGE_NUM_LIMIT)
+		{
+			bucket->next=tl->large_list;
+			tl->large_list = bucket;
+			bucket = NULL;
+		}
+		pthread_mutex_unlock(&(tl->large_bucket_mutex));
+		if (bucket == NULL) return;
+		// release to global cache
+		pthread_mutex_lock(&memory_list_mutex);
+   		bucket->next = memory_list;
+   		memory_list = bucket;
+    	pthread_mutex_unlock(&memory_list_mutex);
 	}
 	else 
 	{
