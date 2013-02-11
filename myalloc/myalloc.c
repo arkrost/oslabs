@@ -4,7 +4,7 @@
 #include <sys/mman.h>
 #include "myalloc.h"
 
-#define SMALL_MEM_LIMIT 8
+#define SMALL_MEM_LIMIT 1024
 #define SMALL_NUM_LIMIT 20
 #define LARGE_NUM_LIMIT 10
 
@@ -118,7 +118,10 @@ void* malloc(size_t size)
     	for (res = tl->large_list, prev = NULL; (res != NULL) && (res->len < size); prev = res, res = res->next);
     	if (res)
     	{
-    		prev->next = res->next;
+    		if (prev)
+    			prev->next = res->next;
+    		else
+    			tl->large_list = res->next;
     		res->next = NULL;
     	}
     	pthread_mutex_unlock(&(tl->large_bucket_mutex));
@@ -128,7 +131,10 @@ void* malloc(size_t size)
     	for (res = memory_list, prev = NULL; (res != NULL) && (res->len < size); prev = res, res = res->next);
     	if (res)
     	{
-    		prev->next = res->next;
+    		if (prev)
+    			prev->next = res->next;
+    		else
+    			memory_list = res->next;
     		res->tid = pthread_self();
     		res->next = NULL;
     	}
