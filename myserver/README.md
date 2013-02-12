@@ -1,0 +1,1 @@
+Myserver listens to given TCP ports and polling lines with length below 20.
