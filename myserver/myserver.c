@@ -17,7 +17,6 @@ typedef struct qpos
 {
 	int *cfd;
     int pos;
-    pthread_mutex_t mutex;
     pthread_t receive_tid;
     pthread_t send_tid;
     struct qpos *next;
@@ -28,30 +27,28 @@ typedef struct message
 	size_t expected;
 	size_t num;
 	size_t len;
-	pthread_mutex_t mutex;
 	char* msg;
 } message_t;
 
 static message_t messages[QUEUE_BACKLOG];
 static size_t mpos, listener_count;
-pthread_rwlock_t messages_lock;
+pthread_rwlock_t global_lock;
 
 static qpos_t *qpos_list;
 
 static qpos_t *new_queue_listener(int *cfd)
 {
-	pthread_rwlock_rdlock(&messages_lock);
+	pthread_rwlock_wrlock(&global_lock);
 	qpos_t *qp = (qpos_t *)malloc(sizeof(qpos_t));
 	if (qp)
 	{
 		qp->pos = mpos;
-		pthread_mutex_init(&(qp->mutex), NULL);
 		qp->next = qpos_list;
 		qp->cfd = cfd;
 		qpos_list = qp;
 		listener_count++;
 	}
-	pthread_rwlock_unlock(&messages_lock);
+	pthread_rwlock_unlock(&global_lock);
 	return qp;
 }
 
@@ -60,7 +57,6 @@ static void free_listeners(qpos_t *listener)
 	if (listener) 
 	{
 		free_listeners(listener->next);
-		pthread_mutex_destroy(&(listener->mutex));
 		free(listener->cfd);
 		free(listener);
 	}
@@ -72,28 +68,27 @@ static size_t next_pos(size_t pos)
 	return (pos + 1) % QUEUE_BACKLOG;
 }
 
-static void new_message(const char *msg)
+static void new_message(const char *msg, size_t len)
 {
-	pthread_rwlock_wrlock(&messages_lock);
+	pthread_rwlock_wrlock(&global_lock);
 	message_t msg_container = messages[mpos];
 	if (msg_container.expected != msg_container.num)
 	{
 		qpos_t* cur;
 		for(cur = qpos_list; cur != NULL; cur = cur->next)
 		{
-			pthread_mutex_lock(&cur->mutex);
 			if (cur->pos == mpos)
 			{
 				cur->pos = next_pos(mpos);
 			}
-			pthread_mutex_unlock(&cur->mutex);
 		}
 	}
 	msg_container.expected = listener_count;
 	msg_container.num = 0;
-	strcpy(msg_container.msg, msg);
+	memcpy(msg_container.msg, msg, len);
+	msg_container.len = len;
 	mpos = next_pos(mpos);
-	pthread_rwlock_unlock(&messages_lock);
+	pthread_rwlock_unlock(&global_lock);
 }
 
 /*
@@ -114,7 +109,7 @@ static int bind_socket(in_port_t port)
     ssa.sin6_family = AF_INET6;
     ssa.sin6_addr = in6addr_any;
     ssa.sin6_port = port;
-    if (setsockopt(sfd, IPPROTO_IPV6, IPV6_V6ONLY, (char *)NULL, 0) == -1) handle_error("setsockopt failure");
+    if (setsockopt(sfd, IPPROTO_IPV6, IPV6_V6ONLY, NULL, sizeof(NULL)) == -1) handle_error("setsockopt failure");
     if (bind(sfd, (struct sockaddr*)&ssa, sizeof(ssa)) == -1) handle_error("bind failure");
     return sfd;
 }
@@ -122,46 +117,103 @@ static int bind_socket(in_port_t port)
 static void* handle_receive(void* qp)
 {
 	qpos_t* pointer = (qpos_t*)qp;
-    struct pollfd poller;
-    poller.fd = *pointer->cfd;
-    poller.events = POLLRDNORM;
-    while(1) 
-    { 
-        poll(&poller, 1, INFTIM);
-        if (poller.revents & POLLRDNORM) 
-        {
-        // TODO: split and add msgs
-        }
-    }
+	if (pointer)
+	{
+		char buf[MESSAGE_LIMIT];
+	    int n;
+	    size_t pos, used = 0;
+	    char skip = 0;
+		struct pollfd poller;
+	    poller.fd = *pointer->cfd;
+	    poller.events = POLLRDNORM;
+	    while(1) 
+	    { 
+	        poll(&poller, 1, INFTIM);
+	        if (poller.revents & POLLRDNORM)
+	        {
+	        	n = read(poller.fd, buf + used, MESSAGE_LIMIT - used);
+	        	if (n <= 0) break;
+	        	used += n;
+	        	pos = 0;
+	        	while (pos < used) 
+	        	{
+		        	for (; pos < used && buf[pos] != '\n'; pos++);
+		        	if (pos < used) 
+		        	{
+			            if (skip) 
+			            {
+			                skip = 0;
+			            } else 
+			            {
+			            	new_message(buf, pos + 1);
+			            }
+			            used -= (pos + 1);
+			            memmove(buf, buf + pos + 1, used);
+			        } 
+			        else if (pos == MESSAGE_LIMIT) 
+			        {
+			            skip = 1;
+			            used = 0;
+			        }
+			    }
+	        }
+	    }
+	    pthread_rwlock_wrlock(&global_lock);
+	    close(poller.fd);
+	    pointer->pos = QUEUE_BACKLOG + 1;
+	    pthread_rwlock_unlock(&global_lock);
+	}
 	return NULL;
 }
 
 static void* handle_send(void* qp)
 {
 	qpos_t* pointer = (qpos_t*)qp;
-    struct pollfd poller;
-    poller.fd = *(pointer->cfd);
-    poller.events = POLLWRNORM;
-    while(1) {
-    	int flag = 1;
-        while (flag) {
-   	    	poll(&poller, 1, INFTIM);
-        	pthread_rwlock_rdlock(&messages_lock);
-        	if (pointer->pos == mpos) flag = 0;
-            if (poller.revents & POLLWRNORM & flag) {
-                int n = 0;
-                message_t* msg_container = &messages[pointer->pos];
-                write(*(pointer->cfd), msg_container->msg, msg_container->len);
-                pthread_mutex_lock(&pointer->mutex);
-                pointer->pos = next_pos(pointer->pos);
-                pthread_mutex_unlock(&pointer->mutex);
-                pthread_mutex_lock(&msg_container->mutex);
-                msg_container->num++;
-                pthread_mutex_unlock(&msg_container->mutex);
-            }
-            pthread_rwlock_unlock(&messages_lock);
-        }
-    }
+	if (pointer)
+	{
+		char buf[MESSAGE_LIMIT];
+		size_t len = 0;
+		int written;
+	    struct pollfd poller;
+	    poller.fd = *(pointer->cfd);
+	    poller.events = POLLWRNORM;
+	    while (1) {
+	    	poll(&poller, 1, INFTIM);
+	    	pthread_rwlock_rdlock(&global_lock);
+	        if ((pointer->pos != mpos) && (poller.revents & POLLWRNORM)) {
+	            int n = 0;
+	            message_t* msg_container = &messages[pointer->pos];
+	            memcpy(buf, msg_container->msg, msg_container->len);
+	            len = msg_container->len;
+	            pointer->pos = next_pos(pointer->pos);
+	            msg_container->num++;
+	        }
+	        pthread_rwlock_unlock(&global_lock);
+	        written = 1;
+	        while (len > 0)
+	        {
+	        	written = write(*(pointer->cfd), buf, len);
+	        	if (written <= 0)
+	        	{
+	        		break;
+	        	}
+	        	else
+	        	{
+	        		len -= written;
+	        		memmove(buf, buf + written, len);
+	        	}
+	        }
+	        if (written <= 0)
+	        {
+	        	break;
+	        }
+	        len = 0;
+	    }
+	    pthread_rwlock_wrlock(&global_lock);
+	    close(poller.fd);
+	    pointer->pos = QUEUE_BACKLOG + 1;
+	    pthread_rwlock_unlock(&global_lock);
+	}
 	return NULL;
 }
 
@@ -211,7 +263,7 @@ int main(int argc, char* argv[])
 		mpos = 0;
 		qpos_list = NULL;
 		listener_count = 0;
-		pthread_rwlock_init(&messages_lock, NULL);
+		pthread_rwlock_init(&global_lock, NULL);
 		//start listening
 		int i, rc;
 		pthread_t handler_tid[argc - 1];
@@ -243,7 +295,7 @@ int main(int argc, char* argv[])
 	    printf("Server: program completed. Free resources.\n");
 	    // free resources
 	    free_listeners(qpos_list);
-	    pthread_rwlock_destroy(&messages_lock);
+	    pthread_rwlock_destroy(&global_lock);
 	    pthread_exit(NULL);
 	}
     return 0;
