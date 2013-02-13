@@ -16,7 +16,7 @@
 typedef struct qpos
 {
 	int *cfd;
-    int pos;
+    size_t pos;
     pthread_t receive_tid;
     pthread_t send_tid;
     struct qpos *next;
@@ -58,10 +58,10 @@ static void free_listeners(qpos_t *listener)
 	if (listener) 
 	{
 		free_listeners(listener->next);
+		close(*listener->cfd);
 		free(listener->cfd);
 		free(listener);
 	}
-	return;
 }
 
 static size_t next_pos(size_t pos)
@@ -72,9 +72,9 @@ static size_t next_pos(size_t pos)
 static void new_message(const char *msg, size_t len)
 {
 	pthread_rwlock_wrlock(&global_lock);
-	message_t msg_container = messages[mpos];
-	pthread_mutex_lock(&msg_container.mutex);
-	if (msg_container.expected != msg_container.num)
+	message_t* msg_container = messages + mpos;
+	pthread_mutex_lock(&msg_container->mutex);
+	if (msg_container->expected != msg_container->num)
 	{
 		qpos_t* cur;
 		for(cur = qpos_list; cur != NULL; cur = cur->next)
@@ -85,20 +85,19 @@ static void new_message(const char *msg, size_t len)
 			}
 		}
 	}
-	msg_container.expected = listener_count;
-	msg_container.num = 0;
-	memcpy(msg_container.msg, msg, len);
-	msg_container.len = len;
+	msg_container->expected = listener_count;
+	msg_container->num = 0;
+	memcpy(msg_container->msg, msg, len);
+	msg_container->len = len;
 	mpos = next_pos(mpos);
-	printf("%lu\n", mpos);
-	pthread_mutex_unlock(&msg_container.mutex);
+	pthread_mutex_unlock(&msg_container->mutex);
 	pthread_rwlock_unlock(&global_lock);
 }
 
 /*
 * Handlers
 */
-static handle_error(const char *msg)
+static void handle_error(const char *msg)
 {
 	perror(msg);
 	pthread_exit(NULL);
@@ -130,7 +129,8 @@ static void* handle_receive(void* qp)
 		struct pollfd poller;
 	    poller.fd = *pointer->cfd;
 	    poller.events = POLLRDNORM;
-	    while(1) 
+	    int loop = 1;
+	    while(loop) 
 	    { 
 	        poll(&poller, 1, INFTIM);
 	        if (poller.revents & POLLRDNORM)
@@ -149,7 +149,6 @@ static void* handle_receive(void* qp)
 			                skip = 0;
 			            } else 
 			            {
-							write(1, buf, pos+1);
 			            	new_message(buf, pos + 1);
 			            }
 			            used -= (pos + 1);
@@ -162,10 +161,13 @@ static void* handle_receive(void* qp)
 			        }
 			    }
 	        }
+	        pthread_rwlock_rdlock(&global_lock);
+	        if (pointer->pos == QUEUE_BACKLOG) loop = 0;
+	        pthread_rwlock_unlock(&global_lock);
 	    }
+	    printf("HR: someone disconnected\n");
 	    pthread_rwlock_wrlock(&global_lock);
-	    close(poller.fd);
-	    pointer->pos = QUEUE_BACKLOG + 1;
+	    pointer->pos = QUEUE_BACKLOG;
 	    pthread_rwlock_unlock(&global_lock);
 	}
 	return NULL;
@@ -182,44 +184,51 @@ static void* handle_send(void* qp)
 	    struct pollfd poller;
 	    poller.fd = *(pointer->cfd);
 	    poller.events = POLLWRNORM;
+	    int finish = 0;
 	    while (1) {
-	    	poll(&poller, 1, INFTIM);
 	    	pthread_rwlock_rdlock(&global_lock);
-	        if ((pointer->pos != mpos) && (poller.revents & POLLWRNORM)) 
+	    	if (pointer->pos == QUEUE_BACKLOG) 
+	    	{
+	    		finish = 1;
+	    	}
+	        else if (pointer->pos != mpos) 
 	        {
-	            message_t* msg_container = &messages[pointer->pos];
+	            message_t* msg_container = messages + pointer->pos;
 	            memcpy(buf, msg_container->msg, msg_container->len);
 	            len = msg_container->len;
 	            pointer->pos = next_pos(pointer->pos);
 	            pthread_mutex_lock(&msg_container->mutex);
 	            msg_container->num++;
 	            pthread_mutex_unlock(&msg_container->mutex);
-	            write(1, buf, MESSAGE_LIMIT);
-	            write(1, "\n", 1);
 	        }
 	        pthread_rwlock_unlock(&global_lock);
-	        while (len > 0)
+	        if (finish) break;
+	        poll(&poller, 1, INFTIM);
+	        if (poller.revents & POLLWRNORM)
 	        {
-	        	written = write(*(pointer->cfd), buf, len);
-	        	if (written <= 0)
-	        	{
-	        		break;
-	        	}
-	        	else
-	        	{
-	        		len -= written;
-	        		memmove(buf, buf + written, len);
-	        	}
-	        }
-	        if (len > 0)
-	        {
-	        	break;
+	        	while (len > 0)
+		        {
+		        	written = write(*(pointer->cfd), buf, len);
+		        	if (written <= 0)
+		        	{
+		        		break;
+		        	}
+		        	else
+		        	{
+		        		len -= written;
+		        		memmove(buf, buf + written, len);
+		        	}
+		        }
+		        if (len > 0)
+		        {
+		        	break;
+		        }	
 	        }
 	        len = 0;
 	    }
+	    printf("HS: someone disconnected\n");
 	    pthread_rwlock_wrlock(&global_lock);
-	    close(poller.fd);
-	    pointer->pos = QUEUE_BACKLOG + 1;
+	    pointer->pos = QUEUE_BACKLOG;
 	    pthread_rwlock_unlock(&global_lock);
 	}
 	return NULL;
@@ -233,7 +242,6 @@ static void* accept_connection(void* p)
     while(1) {
         struct sockaddr_in6 csa;
         socklen_t csalen = sizeof(csa);
-        printf("Handler: accepting connection on port: %hu\n", ntohs(port));
         int* cfd = malloc(sizeof(int));
         *cfd = accept(sfd, (struct sockaddr*)&csa, &csalen);
         if (*cfd == -1) handle_error("accept failure");
@@ -267,6 +275,7 @@ int main(int argc, char* argv[])
 	}
 	else
 	{
+		printf("Server: initilizing...\n");
 		//initialization
 		mpos = 0;
 		qpos_list = NULL;
@@ -289,6 +298,7 @@ int main(int argc, char* argv[])
 		{
 	    	port[i] = htons(atoi(argv[i + 1]));
 	    	rc = pthread_create(&handler_tid[i], &attr, accept_connection, (void*)&port[i]);
+	    	printf("Server: start listening port: %hu\n", ntohs(port[i]));
 	    	if (rc == -1) 	
 	    	{
 	    		printf("failed to start accepting connection pthread_create() is %d\n", rc);
