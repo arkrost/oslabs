@@ -27,6 +27,7 @@ typedef struct message
 	size_t expected;
 	size_t num;
 	size_t len;
+	pthread_mutex_t mutex;
 	char* msg;
 } message_t;
 
@@ -72,6 +73,7 @@ static void new_message(const char *msg, size_t len)
 {
 	pthread_rwlock_wrlock(&global_lock);
 	message_t msg_container = messages[mpos];
+	pthread_mutex_lock(&msg_container.mutex);
 	if (msg_container.expected != msg_container.num)
 	{
 		qpos_t* cur;
@@ -88,6 +90,8 @@ static void new_message(const char *msg, size_t len)
 	memcpy(msg_container.msg, msg, len);
 	msg_container.len = len;
 	mpos = next_pos(mpos);
+	printf("%lu\n", mpos);
+	pthread_mutex_unlock(&msg_container.mutex);
 	pthread_rwlock_unlock(&global_lock);
 }
 
@@ -145,6 +149,7 @@ static void* handle_receive(void* qp)
 			                skip = 0;
 			            } else 
 			            {
+							write(1, buf, pos+1);
 			            	new_message(buf, pos + 1);
 			            }
 			            used -= (pos + 1);
@@ -180,16 +185,19 @@ static void* handle_send(void* qp)
 	    while (1) {
 	    	poll(&poller, 1, INFTIM);
 	    	pthread_rwlock_rdlock(&global_lock);
-	        if ((pointer->pos != mpos) && (poller.revents & POLLWRNORM)) {
-	            int n = 0;
+	        if ((pointer->pos != mpos) && (poller.revents & POLLWRNORM)) 
+	        {
 	            message_t* msg_container = &messages[pointer->pos];
 	            memcpy(buf, msg_container->msg, msg_container->len);
 	            len = msg_container->len;
 	            pointer->pos = next_pos(pointer->pos);
+	            pthread_mutex_lock(&msg_container->mutex);
 	            msg_container->num++;
+	            pthread_mutex_unlock(&msg_container->mutex);
+	            write(1, buf, MESSAGE_LIMIT);
+	            write(1, "\n", 1);
 	        }
 	        pthread_rwlock_unlock(&global_lock);
-	        written = 1;
 	        while (len > 0)
 	        {
 	        	written = write(*(pointer->cfd), buf, len);
@@ -203,7 +211,7 @@ static void* handle_send(void* qp)
 	        		memmove(buf, buf + written, len);
 	        	}
 	        }
-	        if (written <= 0)
+	        if (len > 0)
 	        {
 	        	break;
 	        }
@@ -264,6 +272,12 @@ int main(int argc, char* argv[])
 		qpos_list = NULL;
 		listener_count = 0;
 		pthread_rwlock_init(&global_lock, NULL);
+		size_t qi;
+		for (qi = 0; qi < QUEUE_BACKLOG; qi++)
+		{
+			messages[qi].msg = (char*)malloc(MESSAGE_LIMIT * sizeof(char));
+			pthread_mutex_init(&messages[qi].mutex, NULL);
+		}
 		//start listening
 		int i, rc;
 		pthread_t handler_tid[argc - 1];
@@ -294,6 +308,11 @@ int main(int argc, char* argv[])
 	    }
 	    printf("Server: program completed. Free resources.\n");
 	    // free resources
+	    for (qi = 0; qi < QUEUE_BACKLOG; qi++)
+		{
+			free(messages[qi].msg);
+			pthread_mutex_destroy(&messages[qi].mutex);
+		}
 	    free_listeners(qpos_list);
 	    pthread_rwlock_destroy(&global_lock);
 	    pthread_exit(NULL);
